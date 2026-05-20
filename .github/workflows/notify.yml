@@ -1,0 +1,44 @@
+name: Notify on any feedback activity
+
+# Triggers on ANY issue or comment activity — including activity by yourself.
+# This bypasses GitHub's default "don't notify yourself" behavior.
+
+on:
+  issues:
+    types: [opened, edited, reopened, closed, labeled, assigned]
+  issue_comment:
+    types: [created, edited]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send notification email
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: mail.waverider.ai
+          server_port: 465
+          secure: true
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "[feedback] ${{ github.event_name }} #${{ github.event.issue.number }} — ${{ github.event.issue.title }}"
+          to: kai@waverider.ai, gsu421@gmail.com
+          from: WaveRider Feedback Bot <support@waverider.ai>
+          html_body: |
+            <h3>${{ github.event.sender.login }} → ${{ github.event_name }}</h3>
+            <p><strong>Issue:</strong>
+              <a href="${{ github.event.issue.html_url }}">
+                #${{ github.event.issue.number }} — ${{ github.event.issue.title }}
+              </a>
+            </p>
+            <p><strong>Repo:</strong> ${{ github.repository }}</p>
+            <hr>
+            <h4>Content:</h4>
+            <pre style="white-space: pre-wrap; font-family: -apple-system, sans-serif;">${{ github.event.comment.body || github.event.issue.body }}</pre>
+            <hr>
+            <p>
+              <a href="${{ github.event.comment.html_url || github.event.issue.html_url }}">
+                → View on GitHub
+              </a>
+            </p>
+
