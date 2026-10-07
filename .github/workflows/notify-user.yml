@@ -1,38 +1,114 @@
 name: Notify feedback submitter
 
+# Emails the submitter when a WaveRider member replies on their issue.
+#
+# Contact lookup (AGENT-98): the encrypted `<!-- wr-contact v1 … -->` ref written
+# by waverider-app (src/lib/feedback/contactRef.ts), decrypted with
+# FEEDBACK_CONTACT_KEY and bound to this repo + issue number. Only when the body
+# has no wr-contact text at all, and the issue was filed by the feedback route's
+# account, does it fall back to the single legacy `| **User** | email |` row.
+# A ref that is malformed, tampered, for another issue, or undecryptable is
+# skipped — never a fallback. Logs say sent / skipped / failed with a fixed
+# code only: never an address, a ref, a body or a provider response.
+# AGENT-88 triage comments (`<!-- agent-88:` first line) never notify.
+# Tested by tests/notify-user.test.mjs (runs this exact script and `if:`).
+
 on:
   issue_comment:
     types: [created]
 
+permissions:
+  issues: read
+
 jobs:
   notify:
-    # Only notify when repo members/owners comment (not external users)
-    if: >
-      github.event.comment.author_association == 'OWNER' ||
+    if: >-
+      ${{ !github.event.issue.pull_request &&
+      (github.event.comment.author_association == 'OWNER' ||
       github.event.comment.author_association == 'MEMBER' ||
-      github.event.comment.author_association == 'COLLABORATOR'
+      github.event.comment.author_association == 'COLLABORATOR') &&
+      !startsWith(github.event.comment.body, '<!-- agent-88:') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Extract email and send notification
+      - name: Find submitter and send notification
         uses: actions/github-script@v7
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          FEEDBACK_CONTACT_KEY: ${{ secrets.FEEDBACK_CONTACT_KEY }}
         with:
           script: |
-            const issueBody = context.payload.issue.body || '';
-            const emailMatch = issueBody.match(/\*\*User\*\*\s*\|\s*([^\s|]+@[^\s|]+)/);
+            const crypto = require('node:crypto');
+            const repo = `${context.repo.owner}/${context.repo.repo}`;
+            const number = context.payload.issue.number;
+            const comment = context.payload.comment;
+            const skip = (code) => core.info(`skipped: ${code}`);
 
-            if (!emailMatch) {
-              console.log('No email found in issue body, skipping');
-              return;
+            const EMAIL_RE = /^[^\s@<>|"'`]+@[^\s@<>|"'`]+$/;
+            function decodeRef(body) {
+              const lines = body.split(/\r?\n/).filter((l) => l.includes('wr-contact'));
+              if (lines.length !== 1) return { ok: false, code: 'ambiguous-ref' };
+              const m = /^<!-- wr-contact v1 ([A-Za-z0-9_-]+) -->$/.exec(lines[0]);
+              if (!m || m[1].length > 1024) return { ok: false, code: 'malformed-ref' };
+              const rawKey = process.env.FEEDBACK_CONTACT_KEY || '';
+              const key = Buffer.from(rawKey, 'base64');
+              if (!/^[A-Za-z0-9+/]{43}=$/.test(rawKey) || key.length !== 32 || key.toString('base64') !== rawKey) {
+                return { ok: false, code: 'no-key' };
+              }
+              const raw = Buffer.from(m[1], 'base64url');
+              if (raw.toString('base64url') !== m[1] || raw.length < 12 + 16 + 1) return { ok: false, code: 'malformed-ref' };
+              let plaintext;
+              try {
+                const d = crypto.createDecipheriv('aes-256-gcm', key, raw.subarray(0, 12), { authTagLength: 16 });
+                d.setAAD(Buffer.from(`wr-contact v1\n${repo}\n${number}`, 'utf8'));
+                d.setAuthTag(raw.subarray(raw.length - 16));
+                plaintext = Buffer.concat([d.update(raw.subarray(12, raw.length - 16)), d.final()]).toString('utf8');
+              } catch {
+                return { ok: false, code: 'decrypt-failed' };
+              }
+              let parsed;
+              try {
+                parsed = JSON.parse(plaintext);
+              } catch {
+                return { ok: false, code: 'bad-payload' };
+              }
+              if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false, code: 'bad-payload' };
+              if (Object.keys(parsed).sort().join(',') !== 'email,tier') return { ok: false, code: 'bad-payload' };
+              const { email, tier } = parsed;
+              if (typeof email !== 'string' || typeof tier !== 'string' || email.length > 320 || !EMAIL_RE.test(email) || !tier || tier.length > 64) {
+                return { ok: false, code: 'bad-payload' };
+              }
+              return { ok: true, email };
             }
 
-            const email = emailMatch[1].trim();
-            const issueTitle = context.payload.issue.title;
-            const commentBody = context.payload.comment.body;
-            const commentUrl = context.payload.comment.html_url;
-            const commenter = context.payload.comment.user.login;
+            // Read the issue now: the event's copy can predate the route's ref PATCH.
+            let issue;
+            try {
+              ({ data: issue } = await github.rest.issues.get({ owner: context.repo.owner, repo: context.repo.repo, issue_number: number }));
+            } catch {
+              core.setFailed('notify failed: issue-read');
+              return;
+            }
+            if (issue.pull_request) return skip('pull-request');
+            const body = typeof issue.body === 'string' ? issue.body : '';
 
+            let email;
+            if (body.includes('wr-contact')) {
+              const r = decodeRef(body);
+              if (!r.ok) return skip(r.code);
+              email = r.email;
+            } else {
+              if (issue.user?.login !== 'waveriderai' || issue.user?.type !== 'User') return skip('no-contact');
+              const rows = body.split(/\r?\n/).filter((l) => l.includes('**User**'));
+              const m = rows.length === 1 ? /^\| \*\*User\*\* \| ([^\s|]+) \|$/.exec(rows[0]) : null;
+              if (!m || m[1].length > 320 || !EMAIL_RE.test(m[1])) return skip('no-contact');
+              email = m[1];
+            }
+            if (!process.env.RESEND_API_KEY) return skip('no-resend-key');
+
+            const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+            const ghUrl = (u) => (typeof u === 'string' && /^https:\/\/github\.com\/[^\s"'<>]*$/.test(u) ? u : `https://github.com/${repo}/issues/${number}`);
+            const issueTitle = String(issue.title ?? '');
             const html = `
             <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto;">
               <div style="background: #0a0e27; padding: 20px; border-radius: 8px 8px 0 0;">
@@ -40,35 +116,38 @@ jobs:
               </div>
               <div style="padding: 20px; background: #1a1a2e; color: #e0e0e0; border-radius: 0 0 8px 8px;">
                 <p style="color: #9ca3af; margin-top: 0;">We responded to your feedback:</p>
-                <h3 style="color: #f0f0f0;">${issueTitle}</h3>
+                <h3 style="color: #f0f0f0;">${esc(issueTitle)}</h3>
                 <div style="background: #0d1117; border-left: 3px solid #60a5fa; padding: 12px 16px; border-radius: 4px; margin: 16px 0;">
-                  <p style="color: #c9d1d9; white-space: pre-wrap; margin: 0;">${commentBody.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
+                  <p style="color: #c9d1d9; white-space: pre-wrap; margin: 0;">${esc(comment.body)}</p>
                 </div>
-                <p style="color: #9ca3af; font-size: 13px;">— ${commenter} from WaveRider</p>
-                <a href="${commentUrl}" style="display: inline-block; background: #2563eb; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; margin-top: 12px;">View on GitHub</a>
+                <p style="color: #9ca3af; font-size: 13px;">— ${esc(comment.user?.login)} from WaveRider</p>
+                <a href="${esc(ghUrl(comment.html_url))}" style="display: inline-block; background: #2563eb; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; margin-top: 12px;">View on GitHub</a>
                 <hr style="border: none; border-top: 1px solid #333; margin: 20px 0;">
                 <p style="color: #6b7280; font-size: 12px;">You received this because you submitted feedback on WaveRider.ai. You can reply directly on the GitHub issue linked above.</p>
               </div>
             </div>`;
 
-            const res = await fetch('https://api.resend.com/emails', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                from: 'WaveRider Feedback <feedback@waverider.ai>',
-                to: email,
-                subject: `Re: ${issueTitle}`,
-                html: html,
-              }),
-            });
-
-            const result = await res.json();
-            if (res.ok) {
-              console.log(`Notification sent to ${email}`, result);
-            } else {
-              console.error(`Failed to send to ${email}:`, result);
-              core.setFailed(`Email send failed: ${JSON.stringify(result)}`);
+            let res;
+            try {
+              res = await fetch('https://api.resend.com/emails', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+                  'Content-Type': 'application/json',
+                  'Idempotency-Key': `feedback-comment-${comment.id}`,
+                },
+                body: JSON.stringify({
+                  from: 'WaveRider Feedback <feedback@waverider.ai>',
+                  to: email,
+                  subject: `Re: ${issueTitle}`,
+                  html,
+                }),
+                redirect: 'manual',
+                signal: AbortSignal.timeout(15000),
+              });
+            } catch {
+              core.setFailed('notify failed: resend-request');
+              return;
             }
+            if (res.ok) core.info('sent');
+            else core.setFailed(`notify failed: resend-status-${res.status}`);
