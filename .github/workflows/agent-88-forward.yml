@@ -1,0 +1,71 @@
+# AGENT-88 — forward a new feedback issue's NUMBER to the private triage job.
+#
+# This repo is public and holds no triage or Plane credentials. The only thing
+# that leaves it is {"number": N}; waveriderai/wavefinder-app re-reads the issue
+# itself and decides everything else (agent-88-feedback-triage.yml there).
+#
+# Hosted runner only, no checkout, no token permissions. The number reaches the
+# script through env, never through `${{ }}` inside `run:`. Until the
+# AGENT88_DISPATCH_TOKEN secret exists this warns and exits 0.
+# Tested by tests/agent-88-forward.test.mjs (runs this exact `run:` block).
+name: Forward to triage (AGENT-88)
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  forward:
+    if: ${{ !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch issue number
+        shell: node {0}
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          DISPATCH_TOKEN: ${{ secrets.AGENT88_DISPATCH_TOKEN }}
+        run: |
+          async function main() {
+            const raw = process.env.ISSUE_NUMBER ?? ''
+            if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+              console.log('::error::issue number is not a positive integer')
+              return 1
+            }
+            const token = process.env.DISPATCH_TOKEN ?? ''
+            if (!token) {
+              console.log('::warning::AGENT88_DISPATCH_TOKEN is not set; AGENT-88 forward skipped')
+              return 0
+            }
+            const body = JSON.stringify({ event_type: 'agent-88-feedback-issue', client_payload: { number: Number(raw) } })
+            let res
+            try {
+              res = await fetch('https://api.github.com/repos/waveriderai/wavefinder-app/dispatches', {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  Accept: 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+                },
+                body,
+                redirect: 'manual',
+                signal: AbortSignal.timeout(30000),
+              })
+            } catch {
+              console.log('::error::dispatch request failed (network or timeout); not retried')
+              return 1
+            }
+            if (res.status !== 204) {
+              console.log(`::error::dispatch failed (status ${res.status}); not retried`)
+              return 1
+            }
+            console.log('dispatched')
+            return 0
+          }
+          main().then(
+            (code) => { process.exitCode = code },
+            () => { console.log('::error::dispatch failed'); process.exitCode = 1 },
+          )

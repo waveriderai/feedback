@@ -11,6 +11,9 @@ on:
 
 jobs:
   notify:
+    # AGENT-88 triage comments (first line `<!-- agent-88:`), created or edited
+    # pending→final, are bot bookkeeping: no email. Tested by tests/notify-user.test.mjs.
+    if: ${{ !(github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '<!-- agent-88:')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Send notification email

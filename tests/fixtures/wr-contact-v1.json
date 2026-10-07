@@ -1,0 +1,11 @@
+{
+  "$comment": "TEST FIXTURE ONLY — a throwaway key generated for these tests, never used anywhere else. Produced by waverider-app src/lib/feedback/contactRef.ts (encryptContactRef). Copied byte-identical to waveriderai/feedback tests/fixtures/wr-contact-v1.json so the TS helper and the notify-user.yml decoder are tested against the same bytes.",
+  "fixture_key_base64": "yBefNRDp/0sojSJmoTgzTgl2n50DhsR+vE2QnjqEhFA=",
+  "repo": "waveriderai/feedback",
+  "number": 4242,
+  "ref_line": "<!-- wr-contact v1 o0-3z_lNZq4qLxdpnH8fYogKBYRU_16ZXOe4_o4GMN72XVG-xQ5N_VIJvknFeRozCsL9W5rBWCfhQ_XX74mImwn6XJTjt4x2WxhB0bJOkkiU1A -->",
+  "contact": {
+    "email": "fixture-submitter@example.com",
+    "tier": "pro"
+  }
+}

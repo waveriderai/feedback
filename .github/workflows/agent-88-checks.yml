@@ -1,0 +1,34 @@
+# Offline tests for the workflows in this repo (AGENT-88 / AGENT-98).
+#
+# tests/*.test.mjs run the exact `run:` / `script:` / `if:` text of
+# agent-88-forward.yml, notify-user.yml and notify.yml against fake GitHub and
+# Resend transports. No secret, no network beyond checkout/setup-node, no writes.
+name: AGENT-88 checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-88-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Workflow script tests (fake transports)
+        run: node --test tests/*.test.mjs
